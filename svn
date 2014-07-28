@@ -1,0 +1,224 @@
+//requested extracts.
+
+
+    public void growWorld(Vector3Int location)
+    {
+        for(int x = -settings.getChunkLoadRadius(); x < settings.getChunkLoadRadius(); x++)
+        {
+            for(int y = -settings.getChunkLoadRadius(); y < settings.getChunkLoadRadius(); y++)
+            {
+                for(int z = -settings.getChunkLoadRadius(); z < settings.getChunkLoadRadius(); z++)
+                {
+                    int adjX = location.getX() + x;
+                    int adjY = location.getY() + y;
+                    int adjZ = location.getZ() + z;
+                    Vector3Int adjVector =  new Vector3Int(adjX, adjY, adjZ);
+                    if(!chunksMap.containsKey(adjVector))
+                    {
+                        addChunk(adjVector);
+                    }
+                }
+            }
+        }
+        reduceWorld(location);
+    }
+        
+    public void reduceWorld(Vector3Int location)
+    {
+        Set<Vector3Int> chunkList = chunksMap.keySet();
+        for(Vector3Int coord : chunkList)
+        {
+            
+            if(!between(coord, location, settings.getChunkLoadRadius()))
+            {
+                try
+                {
+                    despawnChunk(coord);
+                }
+                catch (IOException ex)
+                {
+                    Logger.getLogger(BlockTerrainControl.class.getName()).log(Level.SEVERE, null, ex);
+                }
+            }
+            
+        }
+    }
+        
+    public void addChunk(final Vector3Int location)
+    {
+        final BlockTerrainControl temp = this;
+        settings.getApp().enqueue(new Callable<BlockChunkControl>()
+        {
+            public BlockChunkControl call() throws Exception
+            {
+                BlockChunkControl chunk = null;
+                if(!chunksMap.containsKey(location))
+                {
+                    try
+                    {
+                        loadChunk(location);
+                    }
+                    catch (FileNotFoundException ex)
+                    {
+                        chunk = new BlockChunkControl(temp, location.getX(), location.getY(), location.getZ());
+                        chunksMap.put(location, chunk);
+                        if(temp.spatial != null)
+                        {
+                            temp.spatial.addControl(chunk);
+                        }
+                        setChunkFromNoise(location);
+                    }
+                    catch (IOException ex)
+                    {
+                        Logger.getLogger(BlockTerrainControl.class.getName()).log(Level.SEVERE, null, ex);
+                    }
+                }
+                return chunk;
+            }
+        });
+        
+    }
+    
+    /**
+     * loads a chunk from the current coordinates.
+     * If the chunk cannot be found at those coordinates, throse a FNF exception.
+     * @param location 
+     */
+    public void loadChunk(final Vector3Int location) throws FileNotFoundException, IOException
+    {
+        //creates file and data input streams from which to read saved data.
+        FileInputStream inputFile = new FileInputStream(settings.getCurrentGameLocation() + (location.getX() + "--" + location.getY() + "--" + location.getZ() + ".dat"));
+        DataInputStream input = new DataInputStream(inputFile);
+        
+        //list of Bytes to store the data in.
+        ArrayList<Byte> bytelist = new ArrayList<Byte>();
+        
+        //read the data from the given location.
+        boolean EOF = false;
+        while(!EOF)
+        {
+            try
+            {
+                bytelist.add(input.readByte());
+            }
+            catch(EOFException e)
+            {
+                EOF = true;
+            }
+        }
+        
+        //Convert from Byte[] to byte[]
+        Byte[] bytelisttwo = bytelist.toArray(new Byte[bytelist.size()]);
+        byte[] serializedTerrainData = new byte[bytelisttwo.length];
+        for(int a = 0; a < bytelisttwo.length; a++)
+        {
+            serializedTerrainData[a] = bytelisttwo[a].byteValue();
+        }
+        
+        //create a new chunk at the proper location.
+        BlockChunkControl chunk = new BlockChunkControl(this, location.getX(), location.getY(), location.getZ());
+        
+        //deserialise and read the chunk.
+        CubesSerializer.readFromBytes(chunk, serializedTerrainData);
+        
+        //add the chunk to the game.
+        if(spatial != null)
+        {
+            spatial.addControl(chunk);
+        }
+        chunksMap.put(location, chunk);
+        
+    }
+    
+    /**
+     * saves then despawns a chunk at the given coordinates.
+     * @param location 
+     */
+    public void despawnChunk(Vector3Int location) throws IOException
+    {
+        //retreives the chunki to be despawned.
+        BlockChunkControl chunk = chunksMap.get(location);
+        
+        //prepare a file output stream
+        FileOutputStream chunkFile = null;
+        
+        if(chunk != null)
+        {
+            //retreive the byte array
+            byte[] serializedTerrainData = CubesSerializer.writeToBytes(chunk);
+            
+            try
+            {
+                //create a file at the proper location with standardised file names,
+                //for easy acess + retreival. Create the data output stream.
+                chunkFile = new FileOutputStream(settings.getCurrentGameLocation() + (location.getX() + "--" + location.getY() + "--" + location.getZ() + ".dat"));
+                DataOutputStream outputFile = new DataOutputStream(chunkFile);
+                
+                //write & close
+                outputFile.write(serializedTerrainData);
+                outputFile.close();
+                
+                
+                //in order for this to work, we must remove the physics manually.
+                //destroying all the blocks in a chunk will result in a similar error;
+                //the game does not want to calculate a physics shape where there are no
+                //physical objects.
+                Geometry optimizedGeometry = chunk.getOptimizedGeometry_Opaque();
+                if(optimizedGeometry != null)
+                {
+                    RigidBodyControl rigidBodyControl = optimizedGeometry.getControl(RigidBodyControl.class);
+                    settings.getPhysics().getPhysicsSpace().remove(rigidBodyControl);
+                    optimizedGeometry.removeControl(RigidBodyControl.class);
+                }
+                
+                //remove the chunk data from the data management system.
+                if(this.spatial != null)
+                {
+                    spatial.removeControl(chunksMap.get(location));
+                }
+                chunksMap.remove(location);
+            }
+            catch (FileNotFoundException ex)
+            {
+                Logger.getLogger(BlockTerrainControl.class.getName()).log(Level.SEVERE, null, ex);
+            }
+        }
+    }
+
+    
+    
+    public boolean between(Vector3Int a, Vector3Int b, int radius)
+    {
+        int aX = a.getX();
+        int aY = a.getY();
+        int aZ = a.getZ();
+        
+        int bX = b.getX();
+        int bY = b.getY();
+        int bZ = b.getZ();
+        if(aX >= bX - radius && aX < bX + radius)
+        {
+            if(aY >= bY - radius && aY <= bY + radius)
+            {
+                if(aZ >= bZ - radius && aZ <= bZ + radius)
+                {
+                    return true;
+                }
+            }
+            
+        }
+        return false;
+    }
+    
+    public boolean between(int a, int b, int c)
+    {
+        boolean between = false;
+        if(a >= b && a <= c)
+        {
+            between = true;
+        }
+        return between;
+    }
+    
+    
+    
